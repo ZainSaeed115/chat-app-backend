@@ -4,14 +4,9 @@ import cookieParser from "cookie-parser"
 import "dotenv/config";
 
 import userRoutes from "./routes/user.routes.js";
-import chatRoutes from "./routes/chat.routes.js"
-import {
-  createUser,
-  createGroupChat,
-  createSingleChat,
-  createMessage,
-  createMessageInChat
-} from "./seeders/user.js";
+import chatRoutes from "./routes/chat.routes.js";
+import friendRoutes from "./routes/friend.route.js"
+
 const port = process.env.PORT || 5000;
 
 const app = express();
@@ -24,6 +19,7 @@ app.get("/", (req, res) => {
 
 app.use("/api/v1/auth", userRoutes);
 app.use("/api/v1/chat", chatRoutes);
+app.use("/api/v1/friend",friendRoutes);
 
 dbConnect()
   .then(() => {
