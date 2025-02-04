@@ -1,15 +1,24 @@
 import User from "../../models/user/user.model.js";
 import Account from "../../models/user/account.model.js";
 import Chat from "../../models/chat/chat.model.js";
+import FriendRequest from "../../models/request/friendRequest.model.js"
 import bcrypt from "bcrypt";
+import crypto from "crypto"
 import mongoose from "mongoose";
 import { 
   generateAccessTokensAndSaveInCookies,
   generateUniqueUsername,
+  generateVerificationToken,
+
   
  } from "../../utils/commonFunction.js";
 import {UploadFileOnCloudinary} from "../../utils/cloudinary.js"
-
+import {
+  sendVerificationEmail,
+   sendWelcomeEmail,
+   sendResetPasswordRequestEmail,
+   sendResetPasswordSuccessEmail
+  } from "../../nodeMailer/email.js"
 
 
 const registerUser = async (req, res) => {
@@ -54,7 +63,7 @@ const registerUser = async (req, res) => {
 
    
     const hashedPassword = await bcrypt.hash(password, 10);
-
+    const verificationToken=generateVerificationToken()
  
     const account = new Account({
       username:uniqueUsername,
@@ -63,6 +72,8 @@ const registerUser = async (req, res) => {
       Bio: Bio || "", 
       status: "Active",
       user: user._id,
+      verificationToken,
+      verificationTokenExpiresAt: Date.now() + 24 * 60 * 60 * 1000, // 24 hours
     });
 
     await account.save({ session });
@@ -73,7 +84,7 @@ const registerUser = async (req, res) => {
 
    
     const token = await generateAccessTokensAndSaveInCookies(res, account._id);
-
+    await sendVerificationEmail(account?.email,verificationToken)
     return res.status(201).json({
       status: true,
       message: "User account created successfully",
@@ -95,6 +106,48 @@ const registerUser = async (req, res) => {
     });
   }
 };
+
+const verifyEmail=async(req,res)=>{
+ try {
+  const {code}=req.body;
+  
+      const account= await Account.findOne({
+        verificationToken:code,
+        verificationTokenExpiresAt:{$gt:Date.now()}
+    }).populate({
+      path:"user",
+      select:"fName lName"
+    });
+
+    if(!account){
+      return res.status(404).json({
+        success:false,
+        message:"Invalid or expired verification code."
+      })
+    }
+
+   account.isVerified=true;
+   account.verificationToken=undefined
+   account.verificationTokenExpiresAt=undefined
+   account.save()
+   
+   const name=account?.user?.fName+" "+account?.user?.lName;
+   await sendWelcomeEmail(account.email,name);
+
+   return res.status(200).json({
+    success:true,
+    message:"Email Verified Successfully"
+   })
+
+
+ } catch (error) {
+  console.log(`Error in verifying Email:${error}`);
+  return res.status(500).json({
+    success:false,
+    message:"Internal Server Error"
+  })
+ }
+}
 
 const uploadAvatar = async (req, res) => {
   try {
@@ -216,30 +269,81 @@ const logout=async(req,res)=>{
    }
 }
 
+
 const forgotPassword=async(req,res)=>{
-
-  const {email,password} =req.body;
+  try {
+    const {email} =req.body;
   
-  const account=await Account.findOne({email})
-
-  if(!account){
-     return res.status(404).json({
+    const account=await Account.findOne({email})
+  
+    if(!account){
+       return res.status(404).json({
+        status: false,
+        message: "Email not exist",
+       })
+    }
+  
+    const resetToken=crypto.randomBytes(20).toString("hex");
+    const resetTokenExpiryDate=Date.now()+1*60*60*1000;
+  
+    account.resetPasswordToken=resetToken;
+    account.resetPasswordExpiresAt=resetTokenExpiryDate;
+    await account.save();
+  
+    const url=`${process.env.CLIENT_URL}/reset-password/${resetToken}`
+    await sendResetPasswordRequestEmail(account?.email,url);
+  
+    return res.status(200).json({
+      status:true,
+      message: "Reset password link sent to your email",
+    })
+  
+  } catch (error) {
+    console.log("Error in forgot password:",error);
+    return res.status(500).json({
       status: false,
-      message: "Email not exist",
-     })
+      message: "Internal server error",
+    })
   }
+}
 
-  const hashedPassword=await bcrypt.hash(password,10)
-  account.password=hashedPassword
-  await account.save()
-  return res.status(200).json({
-    status:true,
-    message: "Password updated successfully",
-  })
+const resetPassword=async(req,res)=>{
+  try {
+      const {password}=req.body;
+      const token=req.params.token;
+      console.log("Token:",token)
 
+      const account=await Account.findOne({
+        resetPasswordToken:token,
+        resetPasswordExpiresAt:{$gt:Date.now()}
+      })
+      console.log("accountToken:",account.resetPasswordToken);
 
+      if(!account){
+        return res.status(404).json({
+          status: false,
+          message: "Invalid reset token or expired",
+        })
+      }
 
+      const hashedPassword=await bcrypt.hash(password,10);
+      account.password=hashedPassword;
+      account.resetPasswordToken=undefined;
+      account.resetPasswordExpiresAt=undefined;
+      await account.save();
+      await sendResetPasswordSuccessEmail(account?.email);
+      return res.status(200).json({
+        status:true,
+        message: "Password reset successfully",
+      })
 
+  } catch (error) {
+    console.log(`Error in reset password: ${error}`);
+    return res.status(500).json({
+      status: false,
+      message: "Internal server error",
+    })
+  }
 }
 
 const getMyProfile=async(req,res)=>{
@@ -312,6 +416,58 @@ const searchUser = async (req, res) => {
   }
 };
 
+const deleteAccount = async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const userId = req.userId;
+
+  
+    const account = await Account.findById(userId).session(session);
+    if (!account) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({
+        status: false,
+        message: "Account not found",
+      });
+    }
+
+   
+    await Account.findByIdAndDelete(userId, { session });
+
+   
+    await User.findByIdAndDelete(account.user._id, { session });
+
+   
+    await Chat.deleteMany({ members: userId }, { session });
+
+   
+    await FriendRequest.deleteMany(
+      { $or: [{ sender: userId }, { receiver: userId }] },
+      { session }
+    );
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return res.status(200).json({
+      status: true,
+      message: "Account deleted successfully",
+    });
+  } catch (error) {
+    // Abort the transaction in case of an error
+    await session.abortTransaction();
+    session.endSession();
+
+    console.error(`Error in deleteAccount: ${error}`);
+    return res.status(500).json({
+      status: false,
+      message: "Internal server error",
+    });
+  }
+};
 
 
 export {
@@ -320,7 +476,11 @@ export {
    login,
    logout,
    forgotPassword,
+   resetPassword,
    getMyProfile,
    searchUser,
+   verifyEmail,
+   deleteAccount
+
    
    };

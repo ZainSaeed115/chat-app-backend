@@ -30,7 +30,7 @@ export const generateAccessTokensAndSaveInCookies=(res,userId)=>{
 
 }
 
-export const generateVerificationToken=async()=>{
+export const generateVerificationToken=()=>{
     return Math.floor(100000+Math.random()*900000).toString();
 }
 export const generateUniqueUsername = async (baseUsername, session) => {
